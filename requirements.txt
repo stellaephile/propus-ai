@@ -6,3 +6,5 @@ shapely
 sqlalchemy 
 psycopg2-binary
 dotenv
+geoalchemy2
+python-dotenv

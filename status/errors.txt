@@ -1,0 +1,56 @@
+(base) sonalgan@Sonals-MacBook-Air propus-ai % python pipeline/ingest.py
+2026-03-23 00:18:47,112 [INFO] ============================================================
+2026-03-23 00:18:47,112 [INFO] Propus — GTFS PostGIS Ingest Script
+2026-03-23 00:18:47,112 [INFO] ============================================================
+2026-03-23 00:18:47,136 [INFO] Database connection established.
+2026-03-23 00:18:47,136 [INFO] 
+── Ward boundaries ──
+2026-03-23 00:18:47,136 [INFO] Loading ward boundaries from data/raw/delhi_wards.shp...
+Traceback (most recent call last):
+  File "/opt/anaconda3/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "/opt/anaconda3/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 941, in do_execute
+    cursor.execute(statement, parameters)
+psycopg2.errors.RaiseException: find_srid() - could not find the corresponding SRID - is the geometry registered in the GEOMETRY_COLUMNS table?  Is there an uppercase/lowercase mismatch?
+CONTEXT:  PL/pgSQL function find_srid(character varying,character varying,character varying) line 17 at RAISE
+
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sonalgan/propus-ai/pipeline/ingest.py", line 344, in <module>
+    main()
+  File "/Users/sonalgan/propus-ai/pipeline/ingest.py", line 317, in main
+    load_ward_boundaries(engine)
+  File "/Users/sonalgan/propus-ai/pipeline/ingest.py", line 241, in load_ward_boundaries
+    gdf.to_postgis(
+  File "/opt/anaconda3/lib/python3.12/site-packages/geopandas/geodataframe.py", line 2458, in to_postgis
+    geopandas.io.sql._write_postgis(
+  File "/opt/anaconda3/lib/python3.12/site-packages/geopandas/io/sql.py", line 433, in _write_postgis
+    target_srid = connection.execute(
+                  ^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1418, in execute
+    return meth(
+           ^^^^^
+  File "/opt/anaconda3/lib/python3.12/site-packages/sqlalchemy/sql/elements.py", line 515, in _execute_on_connection
+    return connection._execute_clauseelement(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1640, in _execute_clauseelement
+    ret = self._execute_context(
+          ^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+  File "/opt/anaconda3/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 2355, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "/opt/anaconda3/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "/opt/anaconda3/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 941, in do_execute
+    cursor.execute(statement, parameters)
+sqlalchemy.exc.InternalError: (psycopg2.errors.RaiseException) find_srid() - could not find the corresponding SRID - is the geometry registered in the GEOMETRY_COLUMNS table?  Is there an uppercase/lowercase mismatch?
+CONTEXT:  PL/pgSQL function find_srid(character varying,character varying,character varying) line 17 at RAISE
+
+[SQL: SELECT Find_SRID('public', 'wards', 'geometry');]
+(Background on this error at: https://sqlalche.me/e/20/2j85)

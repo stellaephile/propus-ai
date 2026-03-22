@@ -140,11 +140,15 @@ def load_table(engine, feed_name: str, filename: str, cfg: dict):
             if col in chunk.columns:
                 chunk[col] = pd.to_datetime(chunk[col], errors="coerce").dt.date
 
-        method = "replace" if i == 0 else "append"
+        if i == 0:
+            with engine.connect() as _conn:
+                _conn.execute(text(f'TRUNCATE TABLE {schema}."{table}" CASCADE'))
+                _conn.commit()
+
         chunk.to_sql(
             table, engine,
             schema=schema,
-            if_exists=method,
+            if_exists="append",
             index=False,
             method="multi",
         )
@@ -229,10 +233,15 @@ def load_ward_boundaries(engine):
     # Convert ward_id to string
     gdf["ward_id"] = gdf["ward_id"].astype(str).str.strip()
 
+    # Truncate CASCADE to handle ward_metrics FK before reload
+    with engine.connect() as _conn:
+        _conn.execute(text("TRUNCATE TABLE public.wards CASCADE"))
+        _conn.commit()
+
     gdf.to_postgis(
         "wards", engine,
         schema="public",
-        if_exists="replace",
+        if_exists="append",
         index=False,
     )
     log.info(f"✓ Loaded {len(gdf)} ward polygons into public.wards")
