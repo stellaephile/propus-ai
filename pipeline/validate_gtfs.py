@@ -33,12 +33,9 @@ REPORT_PATH = "data/validation_report.txt"
 
 # Delhi bounding box (lat/lon) — used to sanity-check stop coordinates
 DELHI_BBOX = {
-    "lat_min": 28.40,
-    "lat_max": 28.88,
-    "lon_min": 76.84,
-    "lon_max": 77.35,
+    "lat_min": 28.2, "lat_max": 29.2,
+    "lon_min": 76.5, "lon_max": 77.8,
 }
-
 
 def load_feed(name: str, path: str):
     """Load a GTFS feed using gtfs-kit. Returns feed or None."""
