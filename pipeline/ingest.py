@@ -81,14 +81,155 @@ TABLE_MAP = {
     },
 }
 
-# Chunk size for large tables (stop_times can be millions of rows)
+# Chunk size for large tables (stop_times can be millions of rows).
+# Kept at 50k rows — safe with COPY writer (no parameter limit).
 CHUNK_SIZE = 50_000
+
+
+# ---------------------------------------------------------------------------
+# Fast COPY writer — replaces method="multi" which hits psycopg2's 65,535
+# bound-parameter limit at 50k rows × 8+ columns.
+# Uses PostgreSQL COPY FROM STDIN which has no parameter limit and is
+# 10–20× faster than multi-row INSERT for large tables.
+# ---------------------------------------------------------------------------
+def _psql_copy_writer(table, conn, keys, data_iter):
+    """pandas to_sql writer using COPY FROM STDIN via psycopg2."""
+    import io
+    import csv
+    raw = conn.connection          # unwrap SQLAlchemy → psycopg2 connection
+    with raw.cursor() as cur:
+        buf = io.StringIO()
+        writer = csv.writer(buf, quoting=csv.QUOTE_MINIMAL)
+        writer.writerows(data_iter)
+        buf.seek(0)
+        cols = ", ".join(f'"{k}"' for k in keys)
+        cur.copy_expert(
+            f'COPY "{table.schema}"."{table.name}" ({cols}) FROM STDIN WITH (FORMAT CSV)',
+            buf,
+        )
 
 
 def get_engine():
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
     log.info("Database connection established.")
     return engine
+
+
+
+
+# ---------------------------------------------------------------------------
+# FK constraint management
+# ---------------------------------------------------------------------------
+# Cloud SQL blocks both DISABLE TRIGGER ALL (needs superuser) and
+# session_replication_role (restricted). Instead we drop FK constraints
+# before bulk load and recreate them after — no special privileges needed.
+#
+# Constraints discovered from information_schema:
+#   gtfs_bus.stop_times  → stop_times_trip_id_fkey  (trip_id  → trips)
+#   gtfs_bus.stop_times  → stop_times_stop_id_fkey  (stop_id  → stops)
+#   gtfs_bus.trips       → trips_route_id_fkey       (route_id → routes)
+#   gtfs_metro.stop_times → stop_times_trip_id_fkey (trip_id  → trips)
+#   gtfs_metro.stop_times → stop_times_stop_id_fkey (stop_id  → stops)
+#   gtfs_metro.trips      → trips_route_id_fkey      (route_id → routes)
+# ---------------------------------------------------------------------------
+
+_FK_CONSTRAINTS = {
+    "gtfs_bus": [
+        ("stop_times", "stop_times_trip_id_fkey", "trip_id",  "trips",  "trip_id"),
+        ("stop_times", "stop_times_stop_id_fkey", "stop_id",  "stops",  "stop_id"),
+        ("trips",      "trips_route_id_fkey",      "route_id", "routes", "route_id"),
+    ],
+    "gtfs_metro": [
+        ("stop_times", "stop_times_trip_id_fkey", "trip_id",  "trips",  "trip_id"),
+        ("stop_times", "stop_times_stop_id_fkey", "stop_id",  "stops",  "stop_id"),
+        ("trips",      "trips_route_id_fkey",      "route_id", "routes", "route_id"),
+    ],
+}
+
+
+def drop_gtfs_fk_constraints(engine, schema: str):
+    """Drop FK constraints on gtfs schema tables before bulk load."""
+    log.info(f"  Dropping FK constraints on {schema}.*...")
+    constraints = _FK_CONSTRAINTS.get(schema, [])
+    with engine.connect() as conn:
+        for table, constraint, *_ in constraints:
+            conn.execute(text(
+                f'ALTER TABLE {schema}."{table}" DROP CONSTRAINT IF EXISTS "{constraint}"'
+            ))
+            log.info(f"    dropped {schema}.{table}.{constraint}")
+        conn.commit()
+    log.info(f"  ✓ FK constraints dropped for {schema}")
+
+
+def restore_gtfs_fk_constraints(engine, schema: str):
+    """Recreate FK constraints after bulk load."""
+    log.info(f"  Restoring FK constraints on {schema}.*...")
+    constraints = _FK_CONSTRAINTS.get(schema, [])
+    with engine.connect() as conn:
+        for table, constraint, col, ref_table, ref_col in constraints:
+            conn.execute(text(f"""
+                ALTER TABLE {schema}."{table}"
+                ADD CONSTRAINT "{constraint}"
+                FOREIGN KEY ("{col}") REFERENCES {schema}."{ref_table}" ("{ref_col}")
+            """))
+            log.info(f"    restored {schema}.{table}.{constraint}")
+        conn.commit()
+    log.info(f"  ✓ FK constraints restored for {schema}")
+
+# ---------------------------------------------------------------------------
+# ID normalisation
+# ---------------------------------------------------------------------------
+# Problem: clean_gtfs.py added 'bus_' / 'metro_' prefixes to IDs in some
+# files but not others, breaking every JOIN.
+#
+# Observed mismatches (bus feed only — metro route_id + trip_id are clean):
+#   routes.csv   route_id  = 'bus_142'       ← has prefix
+#   trips.csv    route_id  = '142'            ← missing prefix  → ADD 'bus_'
+#
+#   stop_times.csv trip_id = 'bus_920_14_31' ← has prefix
+#   trips.csv      trip_id = '920_14_31'     ← missing prefix  → ADD 'bus_'
+#
+# Rule applied per (feed, filename, column):
+#   If the canonical reference column already has the prefix AND this column
+#   does not → prepend the feed prefix.
+#
+# We detect the mismatch lazily by checking whether values already start with
+# the prefix, so re-running ingest is always idempotent.
+# ---------------------------------------------------------------------------
+
+# Columns to normalise and the prefix to use per feed.
+# Format: { filename: [(col, feed_that_needs_fix), ...] }
+_PREFIX_FIX = {
+    # bus trips.csv: route_id bare → add 'bus_'
+    # bus trips.csv: trip_id  bare → add 'bus_'
+    "trips.csv": [
+        ("route_id", "bus"),
+        ("trip_id",  "bus"),
+    ],
+    # No fixes needed for metro (already consistent).
+}
+
+
+def _normalise_ids(chunk: pd.DataFrame, filename: str, feed_name: str) -> pd.DataFrame:
+    """
+    Add the feed prefix to ID columns that are missing it.
+    Safe to call even when the prefix is already present (idempotent).
+    """
+    fixes = _PREFIX_FIX.get(filename, [])
+    for col, target_feed in fixes:
+        if col not in chunk.columns:
+            continue
+        if feed_name != target_feed:
+            continue
+
+        prefix = f"{feed_name}_"
+        # Only touch rows that don't already carry the prefix
+        mask = ~chunk[col].astype(str).str.startswith(prefix)
+        if mask.any():
+            chunk.loc[mask, col] = prefix + chunk.loc[mask, col].astype(str)
+            log.debug(f"  [{feed_name}] {filename}: prefixed {mask.sum()} rows in '{col}'")
+
+    return chunk
 
 
 def load_table(engine, feed_name: str, filename: str, cfg: dict):
@@ -140,6 +281,9 @@ def load_table(engine, feed_name: str, filename: str, cfg: dict):
             if col in chunk.columns:
                 chunk[col] = pd.to_datetime(chunk[col], errors="coerce").dt.date
 
+        # ── ID normalisation (fixes prefix mismatches without touching CSVs) ──
+        chunk = _normalise_ids(chunk, filename, feed_name)
+
         if i == 0:
             with engine.connect() as _conn:
                 _conn.execute(text(f'TRUNCATE TABLE {schema}."{table}" CASCADE'))
@@ -150,7 +294,7 @@ def load_table(engine, feed_name: str, filename: str, cfg: dict):
             schema=schema,
             if_exists="append",
             index=False,
-            method="multi",
+            method=_psql_copy_writer,
         )
         total_rows += len(chunk)
 
@@ -225,32 +369,68 @@ def load_ward_boundaries(engine):
     if "ward_name" not in gdf.columns:
         gdf["ward_name"] = gdf["ward_id"]
 
-    keep_cols = ["ward_id","ward_name","geometry"]
+    # Convert ward_id to string and strip whitespace
+    gdf["ward_id"] = gdf["ward_id"].astype(str).str.strip()
+
+    # ── FIX: patch any null/empty ward_ids before writing ──
+    null_mask = gdf["ward_id"].isin(["", "None", "nan"]) | gdf["ward_id"].isna()
+    if null_mask.any():
+        count = null_mask.sum()
+        log.warning(f"  {count} ward(s) have null ward_id — generating fallback IDs")
+        fallback_ids = ["ward_fallback_" + str(i).zfill(3) for i in range(count)]
+        gdf.loc[null_mask, "ward_id"] = fallback_ids
+
+    # Fill ward_name from ward_id where missing
+    gdf["ward_name"] = gdf["ward_name"].fillna(gdf["ward_id"])
+
+    # Deduplicate ward_ids (keep first)
+    before = len(gdf)
+    gdf = gdf.drop_duplicates(subset=["ward_id"], keep="first")
+    if len(gdf) < before:
+        log.warning(f"  Dropped {before - len(gdf)} duplicate ward_ids")
+
+    keep_cols = ["ward_id", "ward_name", "geometry"]
     if "district" in gdf.columns:
         keep_cols.append("district")
     gdf = gdf[keep_cols]
 
-    # Convert ward_id to string
-    gdf["ward_id"] = gdf["ward_id"].astype(str).str.strip()
-
-    # Truncate CASCADE to handle ward_metrics FK before reload
+    # Drop CASCADE first to handle ward_metrics FK, then recreate via to_postgis
     with engine.connect() as _conn:
-        _conn.execute(text("TRUNCATE TABLE public.wards CASCADE"))
+        _conn.execute(text("DROP TABLE IF EXISTS public.wards CASCADE"))
         _conn.commit()
 
     gdf.to_postgis(
         "wards", engine,
         schema="public",
-        if_exists="append",
+        if_exists="replace",
         index=False,
     )
-    log.info(f"✓ Loaded {len(gdf)} ward polygons into public.wards")
 
+    # Recreate spatial index and PRIMARY KEY
+    with engine.connect() as _conn:
+        _conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_wards_geom ON public.wards USING GIST (geometry)"
+        ))
+        _conn.execute(text(
+            "ALTER TABLE public.wards ADD PRIMARY KEY (ward_id)"
+        ))
+        _conn.commit()
+    log.info(f"✓ Loaded {len(gdf)} ward polygons into public.wards")
 
 def initialise_ward_metrics(engine):
     """Create a row in derived.ward_metrics for each ward."""
     log.info("Initialising derived.ward_metrics...")
     with engine.connect() as conn:
+        # Recreate FK after wards table was dropped and recreated
+        conn.execute(text("""
+            ALTER TABLE derived.ward_metrics
+            DROP CONSTRAINT IF EXISTS ward_metrics_ward_id_fkey
+        """))
+        conn.execute(text("""
+            ALTER TABLE derived.ward_metrics
+            ADD CONSTRAINT ward_metrics_ward_id_fkey
+            FOREIGN KEY (ward_id) REFERENCES public.wards(ward_id)
+        """))
         conn.execute(text("""
             INSERT INTO derived.ward_metrics (ward_id, ward_name)
             SELECT ward_id, ward_name FROM public.wards
@@ -295,14 +475,55 @@ def verify_load(engine):
                 log.error(f"  ✗  {schema}.{table}: {e}")
 
         # Check geometry population
-        for schema, table in [("gtfs_bus","stops"),("gtfs_metro","stops"),("public","wards")]:
+        geom_checks = [
+            ("gtfs_bus",   "stops", "geom"),
+            ("gtfs_metro", "stops", "geom"),
+            ("public",     "wards", "geometry"),   # to_postgis uses "geometry" not "geom"
+        ]
+        for schema, table, geom_col in geom_checks:
             try:
                 result = conn.execute(
-                    text(f"SELECT COUNT(*) FROM {schema}.{table} WHERE geom IS NOT NULL")
+                    text(f"SELECT COUNT(*) FROM {schema}.{table} WHERE {geom_col} IS NOT NULL")
                 ).scalar()
                 log.info(f"  ✓  {schema}.{table} geom populated: {result:,} rows")
             except Exception as e:
                 log.error(f"  ✗  {schema}.{table} geom check: {e}")
+                
+
+    # ── Post-load join sanity check ──
+    log.info("\n── Join sanity check ──")
+    join_checks = [
+        (
+            "bus trips ↔ routes",
+            """SELECT COUNT(*) FROM gtfs_bus.trips t
+               JOIN gtfs_bus.routes r ON r.route_id = t.route_id"""
+        ),
+        (
+            "bus stop_times ↔ trips",
+            """SELECT COUNT(*) FROM gtfs_bus.stop_times st
+               JOIN gtfs_bus.trips t ON t.trip_id = st.trip_id
+               LIMIT 1"""
+        ),
+        (
+            "bus stop_times ↔ stops",
+            """SELECT COUNT(*) FROM gtfs_bus.stop_times st
+               JOIN gtfs_bus.stops s ON s.stop_id = st.stop_id
+               LIMIT 1"""
+        ),
+        (
+            "metro trips ↔ routes",
+            """SELECT COUNT(*) FROM gtfs_metro.trips t
+               JOIN gtfs_metro.routes r ON r.route_id = t.route_id"""
+        ),
+    ]
+    with engine.connect() as conn:
+        for label, sql in join_checks:
+            try:
+                result = conn.execute(text(sql)).scalar()
+                status = "✓" if result and result > 0 else "✗ ZERO ROWS"
+                log.info(f"  {status}  {label}: {result:,} rows joined")
+            except Exception as e:
+                log.error(f"  ✗  {label}: {e}")
 
 
 def main():
@@ -318,12 +539,20 @@ def main():
 
     # ── Load each GTFS feed ──
     for feed_name in ["bus", "metro"]:
+        schema = "gtfs_bus" if feed_name == "bus" else "gtfs_metro"
         log.info(f"\n── {feed_name.upper()} FEED ──")
-        for filename, cfg in TABLE_MAP.items():
-            load_table(engine, feed_name, filename, cfg)
+
+        # Drop FKs before bulk load, restore after — avoids load-order
+        # violations without needing superuser privileges on Cloud SQL
+        drop_gtfs_fk_constraints(engine, schema)
+        try:
+            for filename, cfg in TABLE_MAP.items():
+                load_table(engine, feed_name, filename, cfg)
+        finally:
+            # Always restore, even if a table load fails mid-way
+            restore_gtfs_fk_constraints(engine, schema)
 
         # Update geometry after stops are loaded
-        schema = "gtfs_bus" if feed_name == "bus" else "gtfs_metro"
         update_stop_geometries(engine, schema)
 
     # ── Post-load steps ──
