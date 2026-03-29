@@ -128,7 +128,7 @@ def create_agent():
 
     agent = Agent(
         name="delhi_transit_agent",
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         description=(
             "Delhi transit equity intelligence agent. Answers questions about "
             "bus/metro coverage, underserved wards, route details, and population-weighted "
