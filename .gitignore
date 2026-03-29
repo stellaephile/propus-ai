@@ -1,2 +1,10 @@
 .env
 .venv
+
+
+data/validation_report.txt
+data/processed/shape_match_report.csv
+
+data/worldpop/*
+
+pipeline/__pycache__
