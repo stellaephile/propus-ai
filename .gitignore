@@ -7,4 +7,5 @@ data/processed/shape_match_report.csv
 
 data/worldpop/*
 
-pipeline/__pycache__
+pipeline/__pycache__data/
+data/
