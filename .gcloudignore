@@ -1,0 +1,62 @@
+# .gcloudignore - Optimize Cloud Build context
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Git
+.git
+.gitignore
+.gitattributes
+.github/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.code-workspace
+
+# Build artifacts
+*.log
+*.pot
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+.mypy_cache/
+
+# Node (if any)
+node_modules/
+.next/
+npm-debug.log
+
+# Data files (unless needed for deployment)
+data/raw/
+.env
+.env.local
+
+# Documentation
+*.md
+docs/
+
+# Status files
+status/
+
+# Development
+.streamlit/
+.cache

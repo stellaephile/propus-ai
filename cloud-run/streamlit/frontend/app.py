@@ -19,7 +19,7 @@ from map_utils import (
     add_buffer_layer,
 )
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
 st.set_page_config(
     page_title="Propus · Delhi Transit Intelligence",
@@ -400,8 +400,8 @@ with col_left:
     st.markdown('<div class="sug-hdr">Suggested starting points</div>',
                 unsafe_allow_html=True)
     for s in [
-        "How far is Mustafabad from the nearest metro?",
-        "Compare transit access in Dwarka vs Seemapuri",
+        "How far is Hauz Khas from the nearest metro?",
+        "Compare transit access in Vasant Vihar vs Vasantkunj",
     ]:
         if st.button(s + "  →", key=f"s_{s[:14]}", use_container_width=True):
             st.session_state._prefill = s
@@ -620,23 +620,6 @@ with col_right:
                 else:
                     # No choropleth to merge with, just show stops
                     st.session_state.map_data = {"type": "stops", "stops": stops}
-
-    # Show recent stops fetch status for debugging (visible when toggles used)
-    status = st.session_state.get("stops_fetch_status")
-    if status:
-        if "error" in status.lower() or "returned" in status.lower():
-            st.error(f"**Stops:** {status}")
-        else:
-            st.success(f"**Stops:** {status}")
-    
-    # Show debug info in expandable section
-    with st.expander("🔍 Debug Info"):
-        st.write(f"- **show_bus:** {show_bus}")
-        st.write(f"- **show_metro:** {show_metro}")
-        st.write(f"- **base_map type:** {st.session_state.base_map.get('type') if st.session_state.base_map else 'None'}")
-        st.write(f"- **map_data type:** {st.session_state.map_data.get('type') if st.session_state.map_data else 'None'}")
-        if st.session_state.map_data and st.session_state.map_data.get("stops"):
-            st.write(f"- **stops count in map_data:** {len(st.session_state.map_data.get('stops', []))}")
 
     m = build_base_map()
     

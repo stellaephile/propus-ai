@@ -1,0 +1,30 @@
+# Propus AI - Streamlit Frontend Requirements for Cloud Run
+# Optimized to avoid dependency conflicts
+
+# Core Data Processing
+pandas>=2.0
+geopandas>=0.14
+shapely>=2.0
+numpy>=1.26
+
+# Web Framework & UI
+streamlit>=1.35.0
+folium>=0.16
+streamlit-folium>=0.18
+plotly>=5.17
+branca>=0.7
+
+# HTTP Client
+requests>=2.31
+httpx>=0.25.0
+
+# Configuration
+python-dotenv>=1.0
+pydantic>=2.5.0
+
+# Geospatial
+geoalchemy2>=0.14
+sqlalchemy>=2.0
+
+# Optional: Enhanced interactivity
+altair>=5.0
