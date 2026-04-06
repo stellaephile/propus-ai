@@ -40,13 +40,24 @@ log = logging.getLogger(__name__)
 
 # Lazy import — agent module is heavy (GEE, sqlalchemy)
 _runner = None
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+SKIP_AGENT_ON_STARTUP = not DATABASE_URL
 
 
 def get_runner():
+    """Get or create the agent runner."""
     global _runner
     if _runner is None:
-        from agent.agent import create_runner
-        _runner = create_runner()
+        if not DATABASE_URL:
+            log.warning("⚠ DATABASE_URL not set — agent will not be available")
+            return None
+        try:
+            from agent.agent import create_runner
+            _runner = create_runner()
+            log.info("✓ Agent initialized successfully")
+        except Exception as e:
+            log.error(f"✗ Failed to initialize agent: {e}")
+            return None
     return _runner
 
 
@@ -56,9 +67,12 @@ def get_runner():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("Propus API starting up — initialising agent...")
-    get_runner()  # warm up on startup
-    log.info("Agent ready.")
+    if not SKIP_AGENT_ON_STARTUP:
+        log.info("Propus API starting up — initialising agent...")
+        get_runner()
+        log.info("Agent ready.")
+    else:
+        log.info("Propus API starting up (database-less mode)")
     yield
     log.info("Propus API shutting down.")
 
@@ -106,38 +120,41 @@ class ChatResponse(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "propus-transit-api"}
+    """Health check endpoint."""
+    db_status = "✓ Connected" if DATABASE_URL else "⚠ No database configured"
+    return {
+        "status": "ok",
+        "service": "propus-backend",
+        "database": db_status,
+        "version": "1.0.0"
+    }
 
 
-@app.post("/chat", response_model=ChatResponse)
+
+@app.post("/chat")
 async def chat(req: ChatRequest):
-    """
-    Send a message to the Delhi Transit Agent and receive a response.
-
-    The agent may call PostGIS tools internally. If the response
-    includes geographic data (stops, wards, routes), it is returned
-    in map_update for the Streamlit frontend to render.
-    """
     try:
-        from agent.agent import run_query
-        response_text = await run_query(
+        from agent.agent import run_with_fallback
+
+        response_text = await run_with_fallback(
             query=req.message,
             session_id=req.session_id,
             user_id=req.user_id,
         )
-    except Exception as exc:
-        log.error(f"Agent error: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
 
-    # Attempt to extract any embedded GeoJSON from the response
-    map_update = _extract_map_data(response_text)
+        return {
+            "response": response_text,
+            "session_id": req.session_id,
+        }
 
-    return ChatResponse(
-        response=response_text,
-        session_id=req.session_id,
-        map_update=map_update,
-    )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
 
+        return {
+            "response": f"⚠️ Error: {str(e)}",
+            "session_id": req.session_id,
+        }
 
 @app.get("/map/stress")
 async def map_stress():
@@ -145,6 +162,32 @@ async def map_stress():
     Return GeoJSON FeatureCollection of all wards coloured by urban_stress_index.
     Used to render the default choropleth on app load.
     """
+    if not DATABASE_URL:
+        log.info("Database not configured — returning mock stress map")
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "ward_id": "1",
+                        "urban_stress_index": 0.45,
+                        "name": "Sample Ward"
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [77.0, 28.5],
+                            [77.1, 28.5],
+                            [77.1, 28.6],
+                            [77.0, 28.6],
+                            [77.0, 28.5]
+                        ]]
+                    }
+                }
+            ]
+        }
+    
     try:
         from mcp_server.server import get_urban_stress_map
         result = get_urban_stress_map()
@@ -163,40 +206,77 @@ async def map_stops(feed: str = "both", limit: int = 500):
         feed: 'bus', 'metro', or 'both'
         limit: Max stops to return per feed (default 500)
     """
-    from sqlalchemy import create_engine, text
-    engine = create_engine(os.environ["DATABASE_URL"])
-
-    queries = []
-    if feed in ("bus", "both"):
-        queries.append(f"""
-            SELECT stop_id, stop_name, 'bus' AS feed, stop_lat, stop_lon
-            FROM gtfs_bus.stops LIMIT {int(limit)}
-        """)
-    if feed in ("metro", "both"):
-        queries.append(f"""
-            SELECT stop_id, stop_name, 'metro' AS feed, stop_lat, stop_lon
-            FROM gtfs_metro.stops LIMIT {int(limit)}
-        """)
-
-    features = []
-    with engine.connect() as conn:
-        for sql in queries:
-            rows = conn.execute(text(sql)).fetchall()
-            for r in rows:
-                features.append({
+    if not DATABASE_URL:
+        # Return mock stops data
+        log.info(f"Database not configured — returning mock {feed} stops")
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
                     "type": "Feature",
+                    "properties": {
+                        "stop_id": "BUS_1",
+                        "stop_name": "Kasturba Nagar Bus Stop",
+                        "feed": "bus"
+                    },
                     "geometry": {
                         "type": "Point",
-                        "coordinates": [float(r.stop_lon), float(r.stop_lat)],
-                    },
+                        "coordinates": [77.2298, 28.5921]
+                    }
+                },
+                {
+                    "type": "Feature",
                     "properties": {
-                        "stop_id": r.stop_id,
-                        "stop_name": r.stop_name,
-                        "feed": r.feed,
+                        "stop_id": "METRO_1",
+                        "stop_name": "Rajiv Chowk Metro Station",
+                        "feed": "metro"
                     },
-                })
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [77.2200, 28.6328]
+                    }
+                }
+            ]
+        }
+    
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
 
-    return {"type": "FeatureCollection", "features": features}
+        queries = []
+        if feed in ("bus", "both"):
+            queries.append(f"""
+                SELECT stop_id, stop_name, 'bus' AS feed, stop_lat, stop_lon
+                FROM gtfs_bus.stops LIMIT {int(limit)}
+            """)
+        if feed in ("metro", "both"):
+            queries.append(f"""
+                SELECT stop_id, stop_name, 'metro' AS feed, stop_lat, stop_lon
+                FROM gtfs_metro.stops LIMIT {int(limit)}
+            """)
+
+        features = []
+        with engine.connect() as conn:
+            for sql in queries:
+                rows = conn.execute(text(sql)).fetchall()
+                for r in rows:
+                    features.append({
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [float(r.stop_lon), float(r.stop_lat)],
+                        },
+                        "properties": {
+                            "stop_id": r.stop_id,
+                            "stop_name": r.stop_name,
+                            "feed": r.feed,
+                        },
+                    })
+
+        return {"type": "FeatureCollection", "features": features}
+    except Exception as e:
+        log.error(f"Error fetching stops: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------------------------

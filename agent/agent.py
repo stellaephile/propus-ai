@@ -34,7 +34,7 @@ import argparse
 import asyncio
 import logging
 import os
-
+import random
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
@@ -44,11 +44,38 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Shared DB engine
+# MODEL CONFIG
+# ---------------------------------------------------------------------------
+
+MODEL_CHAIN = [
+    "gemini-2.5-flash",        # primary (fast + best quality)
+    "gemini-2.0-flash",        # different quota bucket (important fallback)
+    "gemini-2.5-flash-lite",   # lightweight fallback
+    "gemini-2.0-flash-lite",   # cheapest / most permissive
+    "gemini-2.5-pro",          # last resort (expensive, slower)
+]
+
+_current_model_idx = 0
+_model_failures = {m: 0 for m in MODEL_CHAIN}
+
+FAILURE_THRESHOLD = 2
+BASE_DELAY = 2
+MAX_DELAY = 30
+TIMEOUT_SECONDS = 25
+
+# ---------------------------------------------------------------------------
+# SHARED SESSION SERVICE (CRITICAL FIX)
+# ---------------------------------------------------------------------------
+
+from google.adk.sessions import InMemorySessionService
+_session_service = InMemorySessionService()
+
+
+# ---------------------------------------------------------------------------
+# DB ENGINE (SAFE POOLING)
 # ---------------------------------------------------------------------------
 
 _engine = None
-
 
 def get_engine():
     global _engine
@@ -56,36 +83,25 @@ def get_engine():
         _engine = create_engine(
             os.environ["DATABASE_URL"],
             pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=10,
+            pool_size=3,
+            max_overflow=2,
+            pool_recycle=1800,
         )
     return _engine
 
-
 def _q(sql: str, params: dict | None = None) -> list[dict]:
-    """Execute SQL, return list of dicts.
-
-    Coerces Decimal→float and date→str so ADK can JSON-serialize
-    tool return values before sending them to Gemini.
-    psycopg2 returns NUMERIC/DECIMAL columns as decimal.Decimal by default.
-    """
     from decimal import Decimal
     import datetime
 
     def _coerce(v):
-        if isinstance(v, Decimal):
-            return float(v)
-        if isinstance(v, (datetime.date, datetime.datetime)):
-            return v.isoformat()
+        if isinstance(v, Decimal): return float(v)
+        if isinstance(v, (datetime.date, datetime.datetime)): return v.isoformat()
         return v
 
     with get_engine().connect() as conn:
         result = conn.execute(text(sql), params or {})
         cols = list(result.keys())
-        return [
-            {c: _coerce(v) for c, v in zip(cols, row)}
-            for row in result.fetchall()
-        ]
+        return [{c: _coerce(v) for c, v in zip(cols, row)} for row in result.fetchall()]
 
 
 # ---------------------------------------------------------------------------
@@ -557,16 +573,36 @@ def semantic_stop_search(query_text: str, top_n: int = 10) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# RATE LIMIT DETECTION
+# ---------------------------------------------------------------------------
+
+def _is_rate_limit(exc: Exception) -> bool:
+    try:
+        from google.api_core.exceptions import ResourceExhausted, TooManyRequests
+        if isinstance(exc, (ResourceExhausted, TooManyRequests)):
+            return True
+    except ImportError:
+        pass
+
+    msg = str(exc).lower()
+    return any(k in msg for k in ("resource exhausted", "429", "quota", "rate limit"))
+
+def _is_not_found(e: Exception) -> bool:
+    return "not found" in str(e).lower()
+
+def _is_quota(e: Exception) -> bool:
+    return "quota" in str(e).lower() or "429" in str(e)
+
+# ---------------------------------------------------------------------------
 # Agent + Runner
 # ---------------------------------------------------------------------------
 
-def create_agent():
-    """Build the ADK Agent with all 10 transit tools as native functions."""
+def create_agent(model: str):
     from google.adk.agents import Agent
 
     agent = Agent(
         name="delhi_transit_agent",
-        model="gemini-2.5-flash",
+        model=model,
         description="Delhi transit equity intelligence — real GTFS + PostGIS data",
         instruction=SYSTEM_PROMPT,
         tools=[
@@ -582,47 +618,111 @@ def create_agent():
             semantic_stop_search,
         ],
     )
-    log.info("Agent ready — 10 native tools loaded")
+    log.info("Agent ready — model=%s", model)
     return agent
 
 
-def create_runner(agent=None):
-    """Create an ADK Runner with in-memory session service."""
+def create_runner(model: str = None):
     from google.adk.runners import Runner
-    from google.adk.sessions import InMemorySessionService
 
-    runner = Runner(
-        agent=agent or create_agent(),
+    if model is None:
+        model = MODEL_CHAIN[_current_model_idx]
+
+    return Runner(
+        agent=create_agent(model),
         app_name="propus_transit",
-        session_service=InMemorySessionService(),
+        session_service=_session_service,
     )
-    return runner
 
+# ---------------------------------------------------------------------------
+# QUERY EXECUTION (WITH TIMEOUT)
+# ---------------------------------------------------------------------------
 
-async def run_query(query: str, session_id: str = "default",
-                    user_id: str = "user", runner=None) -> str:
-    """Run a query through the agent, return text response."""
+async def _run_query_inner(query: str, session_id: str, user_id: str, runner):
     from google.genai import types
 
-    if runner is None:
-        runner = create_runner()
-
     try:
-        await runner.session_service.create_session(
-            app_name="propus_transit", user_id=user_id, session_id=session_id,
+        await _session_service.create_session(
+            app_name="propus_transit",
+            user_id=user_id,
+            session_id=session_id,
         )
     except Exception:
         pass
 
     content = types.Content(role="user", parts=[types.Part(text=query)])
+
     async for event in runner.run_async(
-        user_id=user_id, session_id=session_id, new_message=content,
+        user_id=user_id,
+        session_id=session_id,
+        new_message=content,
     ):
         if event.is_final_response():
             if event.content and event.content.parts:
                 return event.content.parts[0].text
+
     return ""
 
+async def run_query(query: str, session_id="default", user_id="user", runner=None):
+    if runner is None:
+        runner = create_runner(MODEL_CHAIN[0])
+
+    try:
+        return await asyncio.wait_for(
+            _run_query_inner(query, session_id, user_id, runner),
+            timeout=TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        raise Exception("LLM request timeout")
+
+# ---------------------------------------------------------------------------
+# FALLBACK LOGIC
+# ---------------------------------------------------------------------------
+
+async def run_with_fallback(query: str, session_id="default", user_id="user"):
+    global _current_model_idx
+
+    for model_idx in range(_current_model_idx, len(MODEL_CHAIN)):
+        model = MODEL_CHAIN[model_idx]
+        runner = create_runner(model)
+
+        for attempt in range(3):
+            try:
+                result = await run_query(query, session_id, user_id, runner)
+
+                # Reset failure count on success
+                _model_failures[model] = 0
+
+                # Reset to best model if recovered
+                if _current_model_idx > 0:
+                    log.info("Recovered on %s → resetting to primary model", model)
+                    _current_model_idx = 0
+
+                return result
+
+            except Exception as exc:
+                if _is_rate_limit(exc):
+                    _model_failures[model] += 1
+
+                    wait = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
+                    wait += random.uniform(0, 1)
+
+                    log.warning(
+                        "Rate limit on %s (attempt %d) → waiting %.2fs",
+                        model, attempt + 1, wait,
+                    )
+
+                    await asyncio.sleep(wait)
+
+                    if _model_failures[model] >= FAILURE_THRESHOLD:
+                        log.warning("Switching model due to repeated failures: %s", model)
+                        _current_model_idx = min(model_idx + 1, len(MODEL_CHAIN) - 1)
+                        break
+
+                else:
+                    raise
+        log.info("Using model: %s", model)
+    return "All models are currently rate-limited. Please try again later."
 
 # ---------------------------------------------------------------------------
 # Interactive terminal
@@ -638,7 +738,7 @@ async def _interactive_session():
     print("\nTry:")
     print("  Which wards have the worst transit access?")
     print("  Find stops near Connaught Place (lat 28.6315, lon 77.2167)")
-    print("  Compare Sangam Vihar and Kashmere Gate")
+    print("  Compare Vasant Vihar and Vasantkunj")
     print("  Which bus stops are farthest from any metro?\n")
 
     runner = create_runner()

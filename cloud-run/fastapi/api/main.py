@@ -130,59 +130,31 @@ async def health():
     }
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
-    """
-    Send a message to the Delhi Transit Agent and receive a response.
 
-    The agent may call PostGIS tools internally. If the response
-    includes geographic data (stops, wards, routes), it is returned
-    in map_update for the Streamlit frontend to render.
-    """
-    if not DATABASE_URL:
-        log.warning("Database not configured — returning demo response")
-        return ChatResponse(
-            response="🔧 **Demo Mode**: Database not configured on this Cloud Run instance.\n\n"
-                    "To enable full functionality:\n\n"
-                    "1. Set up a PostgreSQL database with Delhi transit data\n"
-                    "2. Update the environment variable:\n"
-                    "```bash\n"
-                    "gcloud run services update propus-backend \\\\\n"
-                    "  --set-env-vars DATABASE_URL=postgresql://user:pass@host/db \\\\\n"
-                    "  --region asia-south2\n"
-                    "```\n\n"
-                    "For now, the map features (Bus/Metro toggles) are working with mock data!",
-            session_id=req.session_id,
-            map_update=None
-        )
-    
-    runner = get_runner()
-    if runner is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Agent not available — database connection failed"
-        )
-    
+@app.post("/chat")
+async def chat(req: ChatRequest):
     try:
-        from agent.agent import run_query
-        response_text = await run_query(
+        from agent.agent import run_with_fallback
+
+        response_text = await run_with_fallback(
             query=req.message,
             session_id=req.session_id,
             user_id=req.user_id,
         )
-    except Exception as exc:
-        log.error(f"Agent error: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
 
-    # Attempt to extract any embedded GeoJSON from the response
-    map_update = _extract_map_data(response_text)
+        return {
+            "response": response_text,
+            "session_id": req.session_id,
+        }
 
-    return ChatResponse(
-        response=response_text,
-        session_id=req.session_id,
-        map_update=map_update,
-    )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
 
+        return {
+            "response": f"⚠️ Error: {str(e)}",
+            "session_id": req.session_id,
+        }
 
 @app.get("/map/stress")
 async def map_stress():
