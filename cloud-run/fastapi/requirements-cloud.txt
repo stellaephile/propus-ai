@@ -1,0 +1,57 @@
+# Propus AI - Unified Requirements for Cloud Run
+# Consolidated from requirements.txt and requirements_agent.txt
+# Optimized to avoid dependency conflicts
+
+# Core Data Processing
+pandas>=2.0
+geopandas>=0.14
+shapely>=2.0
+rasterio>=1.3
+rasterstats>=0.19
+exactextract
+
+# Database & ORM
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+geoalchemy2>=0.14
+
+# GTFS & Transit Data
+gtfs-kit
+requests>=2.31
+
+
+tqdm
+
+# Numerics
+numpy>=1.26
+scipy>=1.11
+
+# FastAPI Backend
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+pydantic-settings>=2.0.0
+httpx>=0.25.0
+
+
+# ADK agent
+google-adk>=0.4
+google-generativeai>=0.8
+
+# Streamlit Frontend
+streamlit>=1.35.0
+
+streamlit-folium>=0.18
+
+
+
+
+# MCP Server
+fastmcp>=0.4
+
+# Google Cloud
+google-auth>=2.25.0
+google-cloud-resource-manager>=1.10.0
+
+# Environment & Config
+python-dotenv>=1.0

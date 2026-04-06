@@ -1,0 +1,16 @@
+gtfs-kit 
+pandas
+requests 
+geopandas 
+shapely 
+sqlalchemy 
+psycopg2-binary
+dotenv
+geoalchemy2
+python-dotenv
+geoalchemy2
+rasterio 
+exactextract 
+rasterstats  
+tqdm 
+google-cloud-storage

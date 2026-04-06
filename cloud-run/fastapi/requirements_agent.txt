@@ -14,15 +14,7 @@ google-generativeai>=0.8
 
 
 
-# RS pipeline (rs_worldpop.py / rs_sentinel.py)
-rasterio>=1.3
-exactextract
-rasterstats>=0.19
-numpy>=1.26
-requests
-tqdm
-google-cloud-storage>=2.0
-earthengine-api>=0.1
+
 
 # Frontend
 streamlit>=1.32
@@ -38,4 +30,3 @@ pydantic==2.7.1
 python-dotenv==1.0.1
 httpx==0.27.0
 
-sentence-transformers

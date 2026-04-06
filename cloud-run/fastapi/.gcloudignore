@@ -1,0 +1,42 @@
+# fastapi/.gcloudignore - GCP Cloud Build optimization
+# Exclude old requirements files - Cloud Build will use requirements-cloud.txt
+
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.git
+.gitignore
+.venv
+venv/
+env/
+ENV/
+.DS_Store
+*.log
+*.pot
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+.mypy_cache/
+node_modules/
+.next/
+npm-debug.log
+data/raw/
+.env.local
+*.md
+docs/
+status/
+.streamlit/
+.cache
+.idea/
+.vscode/
+
+# CRITICAL: Exclude old requirements files
+# Only requirements-cloud.txt will be used
+requirements.txt
+requirements_agent.txt

@@ -1,0 +1,34 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.git
+.gitignore
+.dockerignore
+.venv
+venv/
+env/
+.DS_Store
+*.md
+.env.local
+node_modules/
+.next/
+status/
+*.log
+.idea/
+.vscode/
+.github/
+
+# Old requirements files - use requirements-cloud.txt only
+requirements.txt
+
+# Data and cache
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+
